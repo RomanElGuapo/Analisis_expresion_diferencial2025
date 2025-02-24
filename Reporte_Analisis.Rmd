@@ -1,0 +1,153 @@
+---
+title: "Análisis de datos con recount3"
+author: "Ángel Román Zamora López"
+date: "2025-02-12"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Carga de paquetes
+
+```{r}
+library("recount3")
+library("edgeR")
+library("ggplot2")
+library("pheatmap")
+library("limma")
+library("RColorBrewer")
+library("ComplexHeatmap")
+```
+
+## Exploración de proyectos en recount3
+
+```{r}
+mouse_projects <- available_projects(organism = "mouse")
+```
+
+## Selección del proyecto de interés
+
+```{r}
+proj_info <- subset(
+  mouse_projects,
+  project == "SRP151148" & project_type == "data_sources"
+)
+```
+
+## Creación del objeto RangedSummarizedExperiment (RSE)
+
+```{r}
+rse_gene_SRP151148 <- create_rse(proj_info)
+assay(rse_gene_SRP151148, "counts") <- compute_read_counts(rse_gene_SRP151148)
+```
+
+## Expansión de atributos y revisión de datos
+
+```{r}
+rse_gene_SRP151148 <- expand_sra_attributes(rse_gene_SRP151148)
+colData(rse_gene_SRP151148)[, grepl("^sra_attribute", colnames(colData(rse_gene_SRP151148)))]
+```
+
+## Formateo de variables de interés
+
+```{r}
+rse_gene_SRP151148$sra_attribute.in_vitro_treatment <- factor(tolower(rse_gene_SRP151148$sra_attribute.in_vitro_treatment))
+rse_gene_SRP151148$sra_attribute.cell_type_short <- factor(tolower(rse_gene_SRP151148$sra_attribute.cell_type_short))
+rse_gene_SRP151148$sra_attribute.tissue <- factor(tolower(rse_gene_SRP151148$sra_attribute.tissue))
+```
+
+## Filtrado de muestras
+
+```{r}
+rse_gene_SRP151148$assigned_gene_prop <- rse_gene_SRP151148$recount_qc.gene_fc_count_all.assigned / rse_gene_SRP151148$recount_qc.gene_fc_count_all.total
+rse_gene_SRP151148 <- rse_gene_SRP151148[, rse_gene_SRP151148$assigned_gene_prop > 0.5]
+gene_means <- rowMeans(assay(rse_gene_SRP151148, "counts"))
+rse_gene_SRP151148 <- rse_gene_SRP151148[gene_means > 0.1, ]
+```
+
+## Normalización de datos
+
+```{r}
+dge <- DGEList(counts = assay(rse_gene_SRP151148, "counts"), genes = rowData(rse_gene_SRP151148))
+dge <- calcNormFactors(dge)
+```
+
+## Exploración de la distribución de datos
+
+```{r}
+ggplot(as.data.frame(colData(rse_gene_SRP151148)), aes(y = assigned_gene_prop, x = sra_attribute.cell_type_short)) +
+  geom_boxplot() +
+  theme_bw(base_size = 20) +
+  ylab("Assigned Gene Prop") +
+  xlab("Cell Type Short")
+```
+
+## Modelado estadístico
+
+```{r}
+mod <- model.matrix(~ sra_attribute.cell_type_short + sra_attribute.in_vitro_treatment + 
+                      rse_gene_SRP151148$sra_attribute.tissue + assigned_gene_prop,
+                    data = colData(rse_gene_SRP151148))
+colnames(mod)
+```
+
+## Análisis diferencial de expresión con limma
+
+```{r}
+vGene <- voom(dge, mod, plot = TRUE)
+eb_results <- eBayes(lmFit(vGene))
+de_results <- topTable(eb_results, coef = 2, number = nrow(rse_gene_SRP151148), sort.by = "none")
+```
+
+## Visualización de resultados
+
+```{r}
+plotMA(eb_results, coef = 2)
+volcanoplot(eb_results, coef = 2, highlight = 3, names = de_results$gene_name)
+```
+
+## Heatmap de genes más significativos
+
+```{r}
+exprs_heatmap <- vGene$E[rank(de_results$adj.P.Val) <= 50, ]
+df <- as.data.frame(colData(rse_gene_SRP151148)[, c("sra_attribute.cell_type_short", "sra_attribute.in_vitro_treatment", "sra_attribute.tissue")])
+colnames(df) <- c("cell_type_short", "in_vitro_treatment", "tissue")
+pheatmap(exprs_heatmap, cluster_rows = TRUE, cluster_cols = TRUE, show_rownames = TRUE, show_colnames = FALSE, annotation_col = df)
+```
+
+## Análisis MDS
+
+```{r}
+col.tissue <- df$tissue
+levels(col.tissue) <- brewer.pal(nlevels(col.tissue), "Paired")
+col.tissue <- as.character(col.tissue)
+plotMDS(vGene$E, labels = df$tissue, col = col.tissue)
+```
+
+## Guardado de resultados
+
+```{r}
+pdf("pheatmap_con_nombres.pdf", height = 14, useDingbats = FALSE)
+pheatmap(exprs_heatmap, cluster_rows = TRUE, cluster_cols = TRUE, show_rownames = TRUE, show_colnames = FALSE, annotation_col = df)
+dev.off()
+```
+
+
+## Interpretación Biológica de los Resultados
+
+    Diversidad Celular y Funcional:
+    El extenso número de niveles en la variable “tipo celular” indica que el estudio abarca una amplia gama de subtipos, lo que es típico en estudios hematopoyéticos o inmunológicos. Las diferencias en los perfiles de expresión entre estas células pueden reflejar estados de diferenciación, especialización funcional o respuestas a estímulos externos.
+
+    Impacto de Tratamientos In Vitro:
+    La inclusión de variables referentes a tratamientos in vitro sugiere que se evaluó el efecto de condiciones experimentales (por ejemplo, cultivos con diferentes factores de crecimiento o citoquinas) sobre la expresión génica. Esto puede ayudar a identificar genes y rutas de señalización que se activan o reprimen en respuesta a dichos tratamientos.
+
+    Relación entre Tejido y Expresión Génica:
+    Al comparar muestras de distintos tejidos (como médula ósea vs. sangre periférica o hígado fetal), el análisis permite inferir cómo el microambiente tisular influye en la expresión génica, revelando posibles diferencias en la función y en el estado de maduración de las células.
+
+    Conclusiones sobre Regulación Genética:
+    La identificación de genes diferencialmente expresados mediante análisis estadístico (usando voom/limma) proporciona pistas sobre posibles reguladores clave en la diferenciación y función celular. Los patrones visualizados en los heatmaps y MDS ayudan a destacar grupos de genes que podrían estar coordinados en rutas biológicas específicas, ofreciendo hipótesis sobre mecanismos moleculares y potenciales biomarcadores.
+    
